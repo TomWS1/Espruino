@@ -73,8 +73,8 @@ void app_error_fault_handler(uint32_t id, uint32_t pc, uint32_t info) {
   TIMER1 (16 bit on nRF51, 32 bit on nRF52) used by jshardware util timer
   TIMER2 (16 bit) free
   SPI0 / TWI0 -> Espruino's SPI1 (only nRF52 - not enough flash on 51)
-  SPI1 / TWI1 -> Espruino's I2C1
-  SPI2 -> free
+  SPI1 / TWI1 -> Espruino's I2C1, SPI1
+  SPI2 -> Espruino's SPI2
 
  */
 
@@ -97,6 +97,14 @@ JshPinFunction pinStates[JSH_PIN_COUNT];
 #if SPI_ENABLED
 static const nrf_drv_spi_t spi0 = NRF_DRV_SPI_INSTANCE(0);
 bool spi0Initialised = false;
+#if SPI_MAX>=2
+static const nrf_drv_spi_t spi1 = NRF_DRV_SPI_INSTANCE(1);
+bool spi1Initialised = false;
+#endif
+#if SPI_MAX>=3
+static const nrf_drv_spi_t spi2 = NRF_DRV_SPI_INSTANCE(2);
+bool spi2Initialised = false;
+#endif
 #endif
 
 static const nrf_drv_twi_t TWI1 = NRF_DRV_TWI_INSTANCE(1);
@@ -188,10 +196,21 @@ static NO_INLINE void jshPinSetFunction_int(JshPinFunction func, uint32_t pin) {
                      jshUSARTUnSetup(EV_SERIAL1);
                    break;
 #if SPI_ENABLED
-  case JSH_SPI1: if (fInfo==JSH_SPI_MISO) NRF_SPI0->PSELMISO = pin;
-                 else if (fInfo==JSH_SPI_MOSI) NRF_SPI0->PSELMOSI = pin;
-                 else NRF_SPI0->PSELSCK = pin;
-                 break;
+  case JSH_SPI1: 
+       if (fInfo==JSH_SPI_MISO) NRF_SPI0->PSELMISO = pin;
+       else if (fInfo==JSH_SPI_MOSI) NRF_SPI0->PSELMOSI = pin;
+       else NRF_SPI0->PSELSCK = pin;
+       break;
+  case JSH_SPI2: 
+       if (fInfo==JSH_SPI_MISO) NRF_SPI1->PSELMISO = pin;
+       else if (fInfo==JSH_SPI_MOSI) NRF_SPI1->PSELMOSI = pin;
+       else NRF_SPI1->PSELSCK = pin;
+       break;
+  case JSH_SPI3: 
+       if (fInfo==JSH_SPI_MISO) NRF_SPI2->PSELMISO = pin;
+       else if (fInfo==JSH_SPI_MOSI) NRF_SPI2->PSELMOSI = pin;
+       else NRF_SPI2->PSELSCK = pin;
+       break;
 #endif
   case JSH_I2C1: if (fInfo==JSH_I2C_SDA) NRF_TWI1->PSELSDA = pin;
                  else NRF_TWI1->PSELSCL = pin;
@@ -402,7 +421,6 @@ JsVarFloat jshGetMillisecondsFromTime(JsSysTime time) {
 
 void jshInterruptOff() {
 #if defined(BLUETOOTH) && defined(NRF52)
-  // disable non-softdevice IRQs. This only seems available on Cortex M3 (not the nRF51's M0)
   __set_BASEPRI(4<<5); // Disabling interrupts completely is not reasonable when using one of the SoftDevices.
 #else
   __disable_irq();
@@ -940,6 +958,12 @@ bool jshIsEventForPin(IOEvent *event, Pin pin) {
 bool jshIsDeviceInitialised(IOEventFlags device) {
 #if SPI_ENABLED
   if (device==EV_SPI1) return spi0Initialised;
+#if SPI_MAX>=2
+  if (device==EV_SPI2) return spi1Initialised;
+#endif
+#if SPI_MAX>=3
+  if (device==EV_SPI3) return spi2Initialised;
+#endif
 #endif
   if (device==EV_I2C1) return twi1Initialised;
   if (device==EV_SERIAL1) return uartInitialised;
@@ -1070,7 +1094,14 @@ void jshUSARTKick(IOEventFlags device) {
 /** Set up SPI, if pins are -1 they will be guessed */
 void jshSPISetup(IOEventFlags device, JshSPIInfo *inf) {
 #if SPI_ENABLED
-  if (device!=EV_SPI1) return;
+  if (device!=EV_SPI1
+#if SPI_MAX>=2
+      && device!=EV_SPI2
+#endif
+#if SPI_MAX>=3
+      && device!=EV_SPI3
+#endif
+     ) return;
 
   nrf_drv_spi_config_t spi_config = NRF_DRV_SPI_DEFAULT_CONFIG;
 
@@ -1099,26 +1130,52 @@ void jshSPISetup(IOEventFlags device, JshSPIInfo *inf) {
   if (jshIsPinValid(inf->pinMOSI))
     spi_config.mosi_pin = (uint32_t)pinInfo[inf->pinMOSI].pin;
 
-  if (spi0Initialised) nrf_drv_spi_uninit(&spi0);
-  spi0Initialised = true;
+  bool *initialised = &spi0Initialised;
+  nrf_drv_spi_t *p_spi = &spi0;
+  JshPinFunction fType = JSH_SPI1;
+  
+  switch (device) {
+    case EV_SPI1:  // default case...
+      break;
+#if SPI_MAX>=2
+    case EV_SPI2:
+      initialised = &spi1Initialised;
+      p_spi = &spi1;
+      fType = JSH_SPI2;
+      break;
+#endif
+#if SPI_MAX>=3
+    case EV_SPI3:
+      initialised = &spi2Initialised;
+      p_spi = &spi2;
+      fType = JSH_SPI3;
+      break;
+#endif
+    default:     // shouldn't happen case!
+      return;
+  }
+
+  if (*initialised) nrf_drv_spi_uninit(p_spi);
+  *initialised = true;
+  
   // No event handler means SPI transfers are blocking
 #if NRF_SD_BLE_API_VERSION<5
-  uint32_t err_code = nrf_drv_spi_init(&spi0, &spi_config, NULL);
+  uint32_t err_code = nrf_drv_spi_init(p_spi, &spi_config, NULL);
 #else
-  uint32_t err_code = nrf_drv_spi_init(&spi0, &spi_config, NULL, NULL);
+  uint32_t err_code = nrf_drv_spi_init(p_spi, &spi_config, NULL, NULL);
 #endif
   if (err_code != NRF_SUCCESS)
     jsExceptionHere(JSET_INTERNALERROR, "SPI Initialisation Error %d\n", err_code);
 
   // nrf_drv_spi_init will set pins, but this ensures we know so can reset state later
   if (jshIsPinValid(inf->pinSCK)) {
-    jshPinSetFunction(inf->pinSCK, JSH_SPI1|JSH_SPI_SCK);
+    jshPinSetFunction(inf->pinSCK, fType|JSH_SPI_SCK);
   }
   if (jshIsPinValid(inf->pinMOSI)) {
-    jshPinSetFunction(inf->pinMOSI, JSH_SPI1|JSH_SPI_MOSI);
+    jshPinSetFunction(inf->pinMOSI, fType|JSH_SPI_MOSI);
   }
   if (jshIsPinValid(inf->pinMISO)) {
-    jshPinSetFunction(inf->pinMISO, JSH_SPI1|JSH_SPI_MISO);
+    jshPinSetFunction(inf->pinMISO, fType|JSH_SPI_MISO);
   }
 #endif
 }
@@ -1128,10 +1185,28 @@ void jshSPISetup(IOEventFlags device, JshSPIInfo *inf) {
  * waits for data to be returned */
 int jshSPISend(IOEventFlags device, int data) {
 #if SPI_ENABLED
-  if (device!=EV_SPI1 || !jshIsDeviceInitialised(device)) return -1;
+  nrf_drv_spi_t *p_spi;
+  switch (device) {
+    case EV_SPI1:
+      p_spi = &spi0;
+      break;
+#if SPI_MAX>=2
+    case EV_SPI2:
+      p_spi = &spi1;
+      break;
+#endif
+#if SPI_MAX>=3
+    case EV_SPI3:
+      p_spi = &spi2;
+      break;
+#endif
+    default:
+      return -1;
+  }
+  if (!jshIsDeviceInitialised(device)) return -1;
   uint8_t tx = (uint8_t)data;
   uint8_t rx = 0;
-  uint32_t err_code = nrf_drv_spi_transfer(&spi0, &tx, 1, &rx, 1);
+  uint32_t err_code = nrf_drv_spi_transfer(p_spi, &tx, 1, &rx, 1);
   if (err_code != NRF_SUCCESS)
     jsExceptionHere(JSET_INTERNALERROR, "SPI Send Error %d\n", err_code);
   return rx;
@@ -1141,9 +1216,27 @@ int jshSPISend(IOEventFlags device, int data) {
 /** Send 16 bit data through the given SPI device. */
 void jshSPISend16(IOEventFlags device, int data) {
 #if SPI_ENABLED
-  if (device!=EV_SPI1 || !jshIsDeviceInitialised(device)) return;
+  nrf_drv_spi_t *p_spi;
+  switch (device) {
+    case EV_SPI1:
+      p_spi = &spi0;
+      break;
+#if SPI_MAX>=2
+    case EV_SPI2:
+      p_spi = &spi1;
+      break;
+#endif
+#if SPI_MAX>=3
+    case EV_SPI3:
+      p_spi = &spi2;
+      break;
+#endif
+    default:
+      return -1;
+  }
+  if (!jshIsDeviceInitialised(device)) return -1;
   uint16_t tx = (uint16_t)data;
-  uint32_t err_code = nrf_drv_spi_transfer(&spi0, (uint8_t*)&tx, 1, 0, 0);
+  uint32_t err_code = nrf_drv_spi_transfer(p_spi, (uint8_t*)&tx, 1, 0, 0);
   if (err_code != NRF_SUCCESS)
     jsExceptionHere(JSET_INTERNALERROR, "SPI Send Error %d\n", err_code);
 #endif

@@ -81,12 +81,17 @@ typedef enum {
 #endif
 #if SPI_COUNT>=1
   EV_SPI1, ///< SPI Devices
+#define SPI_MAX 1  // define as constant since SPI_COUNT gets refined we can't use it
 #endif
 #if SPI_COUNT>=2
   EV_SPI2,
+#undef  SPI_MAX    // to avoid compiler warning
+#define SPI_MAX 2
 #endif
 #if SPI_COUNT>=3
   EV_SPI3,
+#undef  SPI_MAX    // to avoid compiler warning
+#define SPI_MAX 3
 #endif
 #if SPI_COUNT>=1
   EV_SPI_MAX = EV_SPI1 + SPI_COUNT - 1,
